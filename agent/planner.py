@@ -1,62 +1,58 @@
-class TaskPlanner:
-    """A simple framework for breaking down goals into tasks."""
-    
-    def __init__(self):
-        self.task_templates = {
-            'research': ['Gather information', 'Review sources', 'Summarize findings'],
-            'project': ['Define requirements', 'Plan approach', 'Execute', 'Review'],
-            'learning': ['Identify topics', 'Study materials', 'Practice', 'Test knowledge'],
-            'default': ['Analyze goal', 'Break into steps', 'Prioritize', 'Execute']
-        }
-    
-    def plan(self, goal: str) -> list[str]:
-        """
-        Generate a list of tasks for a given goal.
-        
-        Args:
-            goal: A string describing the goal
-            
-        Returns:
-            A list of task strings
-        """
-        goal_lower = goal.lower()
-        
-        # Simple keyword matching to select template
-        if any(word in goal_lower for word in ['research', 'investigate', 'study']):
-            template = self.task_templates['research']
-        elif any(word in goal_lower for word in ['build', 'create', 'develop', 'project']):
-            template = self.task_templates['project']
-        elif any(word in goal_lower for word in ['learn', 'understand', 'master']):
-            template = self.task_templates['learning']
-        else:
-            template = self.task_templates['default']
-        
-        # Contextualize tasks with the goal
-        return [f"{task}: {goal}" for task in template]
-    
-    def add_template(self, name: str, tasks: list[str]):
-        """Add a custom task template."""
-        self.task_templates[name] = tasks
+import json
+from typing import List, Dict, Any
+from agent.flow import Task, ExecutionMode
+# Use the LLM Client we'll optimize with OpenVINO
+from llm.llm_client import OpenVINOClient
 
+class Planner:
+    """
+    The Brain of the Agent. 
+    Uses LLM reasoning to decompose goals into executable Task objects.
+    """
+    def __init__(self, llm_client: OpenVINOClient):
+        self.llm = llm_client
+        self.system_prompt = (
+            "You are a Task Decomposition Engine. Break the user's goal into a "
+            "structured JSON list of tasks. Each task must have: "
+            "'id', 'action' (tool name), and 'params' (input for tool)."
+        )
 
-# Example usage
-if __name__ == "__main__":
-    planner = TaskPlanner()
-    
-    # Test with different goals
-    goals = [
-        "Research market trends for AI startups",
-        "Build a web scraper",
-        "Learn Python decorators"
-    ]
-    
-    for goal in goals:
-        print(f"\nGoal: {goal}")
-        tasks = planner.plan(goal)
-        for i, task in enumerate(tasks, 1):
-            print(f"  {i}. {task}")
-    
-    # Add custom template
-    planner.add_template('writing', ['Outline', 'Draft', 'Edit', 'Publish'])
-    print(f"\n\nCustom template test:")
-    print(planner.plan("Write a blog post"))
+    def generate_plan(self, goal: str, mode: ExecutionMode = ExecutionMode.SEQUENTIAL) -> List[Task]:
+        """
+        Calls the LLM to create a dynamic plan based on the user's goal.
+        """
+        # 1. Construct the reasoning prompt
+        prompt = f"{self.system_prompt}\n\nGoal: {goal}\n\nReturn JSON format only."
+
+        # 2. Get LLM response (This will be the OpenVINO-optimized call)
+        raw_response = self.llm.generate(prompt)
+        
+        # 3. Parse LLM output into framework-compatible Task objects
+        try:
+            plan_data = self._parse_json(raw_response)
+            tasks = []
+            for item in plan_data.get("tasks", []):
+                tasks.append(Task(
+                    id=item['id'],
+                    action=item['action'],
+                    params=item.get('params', {}),
+                    dependencies=item.get('dependencies', [])
+                ))
+            return tasks
+        except Exception as e:
+            # Fallback to a basic template if LLM fails (Guardrail)
+            print(f"Planning failed, using fallback: {e}")
+            return self._get_fallback_plan(goal)
+
+    def _parse_json(self, text: str) -> Dict:
+        """Helper to extract JSON from LLM prose."""
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        return json.loads(text[start:end])
+
+    def _get_fallback_plan(self, goal: str) -> List[Task]:
+        """Ensures the agent is reliable even if the LLM output is malformed."""
+        return [
+            Task(id="analysis", action="llm_tool", params={"query": f"Analyze: {goal}"}),
+            Task(id="summary", action="report_tool", dependencies=["analysis"])
+        ]
