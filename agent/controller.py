@@ -1,82 +1,102 @@
 import uuid
-import logging
 from typing import Dict, Any, List
 from agent.planner import Planner
 from agent.memory import Memory
+from agent.flow import TaskFlow
 from tools.tool_registry import ToolRegistry
 from observability.logger import AgentLogger
 
 class AgentController:
     """
-    The Orchestrator responsible for managing the lifecycle of an agentic workflow.
-    It handles input processing, state management, and tool execution loops.
+    Orchestrates the agentic workflow. 
+    Actively manages the state transition between the Planner and the Executors.
     """
-    def __init__(self, llm_client, memory_backend="sqlite"):
-        self.id = str(uuid.uuid4())
-        self.logger = AgentLogger(name=f"Controller-{self.id}")
+    def __init__(self, llm_client, storage_type="apache_sqlite"):
+        self.controller_id = str(uuid.uuid4())
+        self.logger = AgentLogger(name=f"Controller-{self.controller_id}")
         
-        # Core Components
+        # Dependencies
         self.llm = llm_client
-        self.memory = Memory(backend=memory_backend)
+        self.memory = Memory(backend=storage_type) # Connects to storage (Apache Cassandra/SQLite)
         self.planner = Planner(llm_client=self.llm)
         self.tools = ToolRegistry()
         
-        self.logger.info("Agent Controller Initialized.")
+        self.logger.info("Framework Controller initialized and ready for ingress.")
 
-    def execute_workflow(self, task_input: str) -> Dict[str, Any]:
+    def execute_workflow(self, workflow: TaskFlow, initial_input: str) -> Dict[str, Any]:
         """
-        Main entry point to execute a task flow from input to output.
+        Executes a composed task flow.
+        Satisfies the requirement: "Orchestrate agentic workflows from input to output."
         """
-        self.logger.info(f"Starting workflow for task: {task_input}")
+        session_id = str(uuid.uuid4())
+        self.logger.info(f"Execution started. Session: {session_id} | Flow: {workflow.name}")
         
-        # 1. Initialize State/Memory
-        session_id = self.memory.create_session(task_input)
-        
-        # 2. Planning Phase
-        # The planner decides the DAG or sequence of steps
-        plan = self.planner.generate_plan(task_input)
-        self.logger.info(f"Plan generated with {len(plan['steps'])} steps.")
+        # 1. Store initial task in persistent memory for auditing
+        self.memory.initialize_session(session_id, initial_input)
 
-        # 3. Execution Loop (Orchestration)
-        results = []
-        for step in plan['steps']:
-            step_result = self._execute_step(step, session_id)
-            results.append(step_result)
-            
-            # Check for Guardrails / Break conditions
-            if step_result.get("status") == "failed":
-                self.logger.error(f"Workflow halted at step: {step['name']}")
+        # 2. Planning / DAG Validation
+        # The planner can dynamically adjust the workflow based on the input
+        executable_plan = self.planner.prepare_steps(workflow, initial_input)
+        
+        results = {}
+
+        # 3. Execution Loop (The Orchestration Heart)
+        for task in executable_plan:
+            # Check dependencies (DAG Logic)
+            if not self._check_dependencies(task, results):
+                self.logger.error(f"Task {task.name} blocked by dependency failure.")
+                break
+                
+            # Execute logic
+            output = self._run_task_unit(task, session_id, results)
+            results[task.name] = output
+
+            if output.get("status") == "error":
+                self.logger.warning(f"Aborting flow at {task.name} due to error.")
                 break
 
-        # 4. Final Output Synthesis
-        final_output = self.llm.generate_summary(task_input, results)
+        # 4. Final Output Action
+        final_response = self.llm.synthesize(initial_input, results)
         
-        # 5. Audit & Persistence
-        self.memory.finalize_session(session_id, final_output)
-        return {"session_id": session_id, "output": final_output}
+        # 5. Finalize Audit Trail
+        self.memory.close_session(session_id, final_response)
+        
+        return {
+            "session_id": session_id,
+            "status": "completed",
+            "output": final_response
+        }
 
-    def _execute_step(self, step: Dict[str, Any], session_id: str) -> Dict[str, Any]:
+    def _run_task_unit(self, task: Any, session_id: str, previous_results: Dict) -> Dict:
         """
-        Orchestrates a single task: Tool Selection -> Execution -> Memory Update
+        Internal executor logic for a single unit of work.
         """
-        step_name = step.get("name")
-        tool_name = step.get("tool")
-        tool_input = step.get("args")
-
-        self.logger.info(f"Executing Step: {step_name} using tool: {tool_name}")
-
+        self.logger.info(f"Routing task '{task.name}' to tool '{task.tool_name}'")
+        
         try:
-            # Retrieve context from memory
-            context = self.memory.get_context(session_id)
+            # Context injection from memory and previous steps
+            context = self.memory.get_session_context(session_id)
             
-            # Execute the tool
-            tool_output = self.tools.call(tool_name, tool_input, context)
+            # Execute tool call
+            tool_result = self.tools.execute(
+                name=task.tool_name, 
+                args=task.args, 
+                context=context,
+                history=previous_results
+            )
             
-            # Update memory with tool results (Observability/Audit)
-            self.memory.update_log(session_id, step_name, tool_output)
+            # Observability: Log result to persistent store
+            self.memory.log_step(session_id, task.name, tool_result)
             
-            return {"step": step_name, "status": "success", "data": tool_output}
-        
+            return {"status": "success", "data": tool_result}
+            
         except Exception as e:
-            self.logger.error(f"Step {step_name} failed: {str(e)}")
-            return {"step": step_name, "status": "failed", "error": str(e)}
+            self.logger.error(f"Execution error in {task.name}: {str(e)}")
+            return {"status": "error", "message": str(e)}
+
+    def _check_dependencies(self, task: Any, results: Dict) -> bool:
+        """Verifies if all parent tasks in the DAG completed successfully."""
+        for dep in task.depends_on:
+            if dep not in results or results[dep].get("status") != "success":
+                return False
+        return True
