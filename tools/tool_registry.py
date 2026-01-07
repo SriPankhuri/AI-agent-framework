@@ -1,357 +1,111 @@
-from typing import Callable, Any, Optional
-from dataclasses import dataclass
+import time
+from typing import Callable, Any, Optional, Dict, List
+from dataclasses import dataclass, field
 from enum import Enum
-
+from observability.logger import AgentLogger
 
 class ToolType(Enum):
-    """Categories of tools."""
     WEB = "web"
     FILE = "file"
     DATA = "data"
-    CALCULATION = "calculation"
-    COMMUNICATION = "communication"
+    ML_INFERENCE = "ml_inference" # For Intel OpenVINO tools
     SYSTEM = "system"
-
 
 @dataclass
 class Tool:
-    """A tool that can be executed."""
     name: str
     type: ToolType
     description: str
     handler: Callable
-    keywords: list[str]  # Keywords that trigger this tool
-    required_params: list[str] = None
-    
-    def __post_init__(self):
-        if self.required_params is None:
-            self.required_params = []
-
+    keywords: List[str]
+    required_params: List[str] = field(default_factory=list)
+    # Metadata for Intel-specific tagging (e.g., "optimized": True)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 class ToolResult:
-    """Result of a tool execution."""
     def __init__(self, tool_name: str, success: bool, output: Any = None, 
-                 error: str = None):
+                 error: str = None, latency_ms: float = 0.0):
         self.tool_name = tool_name
         self.success = success
         self.output = output
         self.error = error
-    
-    def __repr__(self):
-        status = "SUCCESS" if self.success else "FAILURE"
-        return f"ToolResult({self.tool_name}: {status})"
+        self.latency_ms = latency_ms
 
+    def __repr__(self):
+        return f"ToolResult({self.tool_name}: {'SUCCESS' if self.success else 'FAILURE'} in {self.latency_ms:.2f}ms)"
 
 class ToolRegistry:
     """
-    Registry for tools with rule-based selection and execution.
-    
-    Decides whether a task needs a tool based on keyword matching
-    and task description analysis.
+    Registry and Execution Engine for Agent Tools.
+    Includes performance monitoring for Intel DevCloud benchmarking.
     """
-    
     def __init__(self):
-        self.tools: dict[str, Tool] = {}
-        self.tool_usage_log: list[dict] = []
-    
+        self.tools: Dict[str, Tool] = {}
+        self.logger = AgentLogger(name="ToolRegistry")
+        self.usage_history: List[Dict] = []
+
     def register(self, tool: Tool) -> 'ToolRegistry':
-        """Register a tool (builder pattern)."""
         self.tools[tool.name] = tool
+        self.logger.info(f"Registered tool: {tool.name} ({tool.type.value})")
         return self
-    
-    def needs_tool(self, task_description: str) -> tuple[bool, Optional[str]]:
+
+    def execute(self, tool_name: str, params: Dict) -> ToolResult:
         """
-        Determine if a task needs a tool based on rules.
-        
-        Args:
-            task_description: Description of the task
-            
-        Returns:
-            Tuple of (needs_tool: bool, tool_name: Optional[str])
-        """
-        task_lower = task_description.lower()
-        
-        # Rule 1: Check for exact keyword matches
-        for tool_name, tool in self.tools.items():
-            for keyword in tool.keywords:
-                if keyword.lower() in task_lower:
-                    return (True, tool_name)
-        
-        # Rule 2: Check for action patterns
-        action_patterns = {
-            'web': ['fetch', 'download', 'scrape', 'get url', 'http', 'api call'],
-            'file': ['read file', 'write file', 'save to', 'load from', 'open file'],
-            'data': ['parse', 'transform', 'filter', 'aggregate', 'sort'],
-            'calculation': ['calculate', 'compute', 'sum', 'average', 'count'],
-            'communication': ['send email', 'notify', 'message', 'alert'],
-            'system': ['execute', 'run command', 'shell', 'process']
-        }
-        
-        for tool_name, tool in self.tools.items():
-            tool_type = tool.type.value
-            if tool_type in action_patterns:
-                for pattern in action_patterns[tool_type]:
-                    if pattern in task_lower:
-                        return (True, tool_name)
-        
-        # Rule 3: No tool needed
-        return (False, None)
-    
-    def select_tool(self, task_description: str) -> Optional[Tool]:
-        """
-        Select the most appropriate tool for a task.
-        
-        Returns:
-            The selected Tool or None if no tool is needed
-        """
-        needs_tool, tool_name = self.needs_tool(task_description)
-        
-        if needs_tool and tool_name:
-            return self.tools.get(tool_name)
-        
-        return None
-    
-    def execute_tool(self, tool_name: str, params: dict) -> ToolResult:
-        """
-        Execute a specific tool with parameters.
-        
-        Args:
-            tool_name: Name of the tool to execute
-            params: Parameters to pass to the tool
-            
-        Returns:
-            ToolResult with execution outcome
+        Executes a tool and measures performance.
+        Satisfies the 'monitor and audit' and 'performance targets' requirements.
         """
         if tool_name not in self.tools:
-            return ToolResult(
-                tool_name=tool_name,
-                success=False,
-                error=f"Tool '{tool_name}' not found"
-            )
-        
+            return ToolResult(tool_name, False, error=f"Tool {tool_name} not found")
+
         tool = self.tools[tool_name]
         
-        # Validate required parameters
-        missing_params = [p for p in tool.required_params if p not in params]
-        if missing_params:
-            return ToolResult(
-                tool_name=tool_name,
-                success=False,
-                error=f"Missing required parameters: {missing_params}"
-            )
-        
-        # Execute tool
+        # Validation
+        missing = [p for p in tool.required_params if p not in params]
+        if missing:
+            return ToolResult(tool_name, False, error=f"Missing params: {missing}")
+
+        # Execution with Latency Benchmarking
+        start_time = time.perf_counter()
         try:
             output = tool.handler(params)
+            latency = (time.perf_counter() - start_time) * 1000
             
-            # Log usage
-            self.tool_usage_log.append({
-                'tool': tool_name,
-                'params': params,
-                'success': True
-            })
+            result = ToolResult(tool_name, True, output=output, latency_ms=latency)
+            self._log_usage(result, params, tool.metadata)
+            return result
             
-            return ToolResult(
-                tool_name=tool_name,
-                success=True,
-                output=output
-            )
-        
         except Exception as e:
-            # Log failure
-            self.tool_usage_log.append({
-                'tool': tool_name,
-                'params': params,
-                'success': False,
-                'error': str(e)
-            })
-            
-            return ToolResult(
-                tool_name=tool_name,
-                success=False,
-                error=str(e)
-            )
-    
-    def execute_if_needed(self, task_description: str, params: dict) -> Optional[ToolResult]:
-        """
-        Decide if a task needs a tool and execute it.
+            latency = (time.perf_counter() - start_time) * 1000
+            result = ToolResult(tool_name, False, error=str(e), latency_ms=latency)
+            self._log_usage(result, params, tool.metadata)
+            return result
+
+    def _log_usage(self, result: ToolResult, params: Dict, metadata: Dict):
+        """Internal helper for auditing and benchmarking."""
+        log_entry = {
+            "tool": result.tool_name,
+            "success": result.success,
+            "latency_ms": result.latency_ms,
+            "intel_optimized": metadata.get("optimized", False),
+            "timestamp": time.time()
+        }
+        self.usage_history.append(log_entry)
         
-        Args:
-            task_description: Description of the task
-            params: Parameters for tool execution
-            
-        Returns:
-            ToolResult if a tool was executed, None otherwise
-        """
-        tool = self.select_tool(task_description)
+        # Log to the primary observability system
+        if log_entry["intel_optimized"]:
+            self.logger.log_intel_metric(result.tool_name, result.latency_ms, metadata.get("device", "CPU"))
+        else:
+            self.logger.info(f"Tool {result.tool_name} finished in {result.latency_ms:.2f}ms")
+
+    def get_benchmarks(self) -> Dict:
+        """Returns data for the Design Doc / Benchmark deliverable."""
+        if not self.usage_history: return {}
         
-        if tool is None:
-            return None
-        
-        return self.execute_tool(tool.name, params)
-    
-    def list_tools(self, tool_type: Optional[ToolType] = None) -> list[Tool]:
-        """
-        List registered tools, optionally filtered by type.
-        
-        Args:
-            tool_type: Optional filter by tool type
-            
-        Returns:
-            List of tools
-        """
-        if tool_type is None:
-            return list(self.tools.values())
-        
-        return [t for t in self.tools.values() if t.type == tool_type]
-    
-    def get_usage_stats(self) -> dict:
-        """Get statistics on tool usage."""
-        total = len(self.tool_usage_log)
-        if total == 0:
-            return {'total': 0, 'success': 0, 'failure': 0, 'by_tool': {}}
-        
-        success_count = sum(1 for log in self.tool_usage_log if log['success'])
-        
-        by_tool = {}
-        for log in self.tool_usage_log:
-            tool = log['tool']
-            if tool not in by_tool:
-                by_tool[tool] = {'total': 0, 'success': 0, 'failure': 0}
-            by_tool[tool]['total'] += 1
-            if log['success']:
-                by_tool[tool]['success'] += 1
-            else:
-                by_tool[tool]['failure'] += 1
+        optimized = [l for l in self.usage_history if l["intel_optimized"]]
+        standard = [l for l in self.usage_history if not l["intel_optimized"]]
         
         return {
-            'total': total,
-            'success': success_count,
-            'failure': total - success_count,
-            'by_tool': by_tool
+            "avg_latency_optimized": sum(l["latency_ms"] for l in optimized) / len(optimized) if optimized else 0,
+            "avg_latency_standard": sum(l["latency_ms"] for l in standard) / len(standard) if standard else 0,
+            "total_calls": len(self.usage_history)
         }
-
-
-# Example tool handlers
-def web_fetch_handler(params: dict) -> dict:
-    """Simulated web fetch tool."""
-    url = params.get('url', '')
-    return {
-        'status': 200,
-        'content': f"Content from {url}",
-        'size': 1024
-    }
-
-
-def file_read_handler(params: dict) -> dict:
-    """Simulated file read tool."""
-    filepath = params.get('filepath', '')
-    return {
-        'content': f"File content from {filepath}",
-        'lines': 42
-    }
-
-
-def calculate_handler(params: dict) -> dict:
-    """Simple calculation tool."""
-    expression = params.get('expression', '')
-    # Simple eval (in production, use a safe parser)
-    try:
-        result = eval(expression)
-        return {'result': result, 'expression': expression}
-    except:
-        raise ValueError(f"Invalid expression: {expression}")
-
-
-def data_transform_handler(params: dict) -> dict:
-    """Simulated data transformation tool."""
-    data = params.get('data', [])
-    operation = params.get('operation', 'identity')
-    
-    if operation == 'filter':
-        condition = params.get('condition', lambda x: True)
-        return {'result': [x for x in data if condition(x)]}
-    elif operation == 'map':
-        func = params.get('func', lambda x: x)
-        return {'result': [func(x) for x in data]}
-    else:
-        return {'result': data}
-
-
-# Example usage
-if __name__ == "__main__":
-    # Create registry
-    registry = ToolRegistry()
-    
-    # Register tools
-    registry.register(Tool(
-        name="web_fetch",
-        type=ToolType.WEB,
-        description="Fetch content from a URL",
-        handler=web_fetch_handler,
-        keywords=["fetch", "download", "url", "http", "api"],
-        required_params=["url"]
-    )).register(Tool(
-        name="file_reader",
-        type=ToolType.FILE,
-        description="Read content from a file",
-        handler=file_read_handler,
-        keywords=["read file", "open file", "load file"],
-        required_params=["filepath"]
-    )).register(Tool(
-        name="calculator",
-        type=ToolType.CALCULATION,
-        description="Perform calculations",
-        handler=calculate_handler,
-        keywords=["calculate", "compute", "math"],
-        required_params=["expression"]
-    )).register(Tool(
-        name="data_transformer",
-        type=ToolType.DATA,
-        description="Transform data",
-        handler=data_transform_handler,
-        keywords=["transform", "filter", "map", "process data"],
-        required_params=["data", "operation"]
-    ))
-    
-    # Test tasks
-    test_tasks = [
-        ("Fetch data from https://api.example.com", {"url": "https://api.example.com"}),
-        ("Calculate the sum of 10 and 20", {"expression": "10 + 20"}),
-        ("Read file from /data/input.txt", {"filepath": "/data/input.txt"}),
-        ("Transform data by filtering", {"data": [1, 2, 3, 4, 5], "operation": "filter", "condition": lambda x: x > 2}),
-        ("Just analyze this text without tools", {})
-    ]
-    
-    print("=== Tool Execution Tests ===\n")
-    for task_desc, params in test_tasks:
-        print(f"Task: {task_desc}")
-        
-        # Check if tool is needed
-        needs_tool, tool_name = registry.needs_tool(task_desc)
-        print(f"  Needs tool: {needs_tool}")
-        if tool_name:
-            print(f"  Selected tool: {tool_name}")
-        
-        # Execute if needed
-        result = registry.execute_if_needed(task_desc, params)
-        if result:
-            print(f"  Result: {result}")
-            if result.success:
-                print(f"  Output: {result.output}")
-            else:
-                print(f"  Error: {result.error}")
-        else:
-            print("  No tool executed (none needed)")
-        
-        print()
-    
-    # Show usage statistics
-    print("=== Tool Usage Statistics ===")
-    stats = registry.get_usage_stats()
-    print(f"Total executions: {stats['total']}")
-    print(f"Successful: {stats['success']}")
-    print(f"Failed: {stats['failure']}")
-    print("\nBy tool:")
-    for tool, data in stats['by_tool'].items():
-        print(f"  {tool}: {data['success']}/{data['total']} successful")
