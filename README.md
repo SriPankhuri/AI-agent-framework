@@ -231,3 +231,5 @@ It is closer to building your own ChatGPT than using an API.
 ## Author
 
 Educational AI agent framework project for learning how autonomous AI systems work locally without cloud APIs.
+## Contribution
+Fixed runtime errors and made framework executable locally.
