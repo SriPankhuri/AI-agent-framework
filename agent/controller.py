@@ -17,7 +17,7 @@ class AgentController:
         
         # Dependencies
         self.llm = llm_client
-        self.memory = Memory(backend=storage_type) # Connects to storage (Apache Cassandra/SQLite)
+        self.memory = Memory(backend_type=storage_type)  # Connects to storage (Apache Cassandra/SQLite)
         self.planner = Planner(llm_client=self.llm)
         self.tools = ToolRegistry()
         

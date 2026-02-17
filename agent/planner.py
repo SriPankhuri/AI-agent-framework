@@ -2,14 +2,15 @@ import json
 from typing import List, Dict, Any
 from agent.flow import Task, ExecutionMode
 # Use the LLM Client we'll optimize with OpenVINO
-from llm.llm_client import OpenVINOClient
+from llm.llm_client import HFLocalLLM
+
 
 class Planner:
     """
     The Brain of the Agent. 
     Uses LLM reasoning to decompose goals into executable Task objects.
     """
-    def __init__(self, llm_client: OpenVINOClient):
+    def __init__(self,  llm_client):
         self.llm = llm_client
         self.system_prompt = (
             "You are a Task Decomposition Engine. Break the user's goal into a "
@@ -56,3 +57,12 @@ class Planner:
             Task(id="analysis", action="llm_tool", params={"query": f"Analyze: {goal}"}),
             Task(id="summary", action="report_tool", dependencies=["analysis"])
         ]
+    
+
+    # --- Compatibility wrapper for controller ---
+    def prepare_steps(self, workflow, user_input):
+        """
+        Returns the tasks in execution order.
+        Currently no dynamic planning — just linear execution.
+        """
+        return workflow.tasks

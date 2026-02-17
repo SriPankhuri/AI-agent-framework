@@ -96,3 +96,23 @@ class Memory:
     def clear_session_cache(self):
         """Clears RAM while keeping the persistent audit trail on disk."""
         self.entries.clear()
+
+    # --- Compatibility layer for controller ---
+
+    def initialize_session(self, session_id: str, initial_input: str):
+        """Start a session"""
+        self.record(session_id, "session_start", "input", "started", result=initial_input)
+
+    def log_step(self, session_id: str, task_name: str, result: dict):
+        """Log each step execution"""
+        status = result.get("status", "unknown")
+        self.record(session_id, task_name, "tool_execution", status, result=result)
+
+    def close_session(self, session_id: str, final_output: str):
+        """Close session"""
+        self.record(session_id, "session_end", "output", "completed", result=final_output)
+
+    def get_session_context(self, session_id: str) -> dict:
+        """Provide previous steps as context"""
+        history = self.get_session_history(session_id)
+        return {entry.task_id: entry.result for entry in history if entry.result is not None}

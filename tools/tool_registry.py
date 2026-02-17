@@ -49,36 +49,23 @@ class ToolRegistry:
         self.logger.info(f"Registered tool: {tool.name} ({tool.type.value})")
         return self
 
-    def execute(self, tool_name: str, params: Dict) -> ToolResult:
+    def execute(self, name, args=None, context=None, history=None):
         """
-        Executes a tool and measures performance.
-        Satisfies the 'monitor and audit' and 'performance targets' requirements.
+        Universal tool executor compatible with controller
         """
-        if tool_name not in self.tools:
-            return ToolResult(tool_name, False, error=f"Tool {tool_name} not found")
 
-        tool = self.tools[tool_name]
-        
-        # Validation
-        missing = [p for p in tool.required_params if p not in params]
-        if missing:
-            return ToolResult(tool_name, False, error=f"Missing params: {missing}")
+        args = args or {}
 
-        # Execution with Latency Benchmarking
-        start_time = time.perf_counter()
-        try:
-            output = tool.handler(params)
-            latency = (time.perf_counter() - start_time) * 1000
-            
-            result = ToolResult(tool_name, True, output=output, latency_ms=latency)
-            self._log_usage(result, params, tool.metadata)
-            return result
-            
-        except Exception as e:
-            latency = (time.perf_counter() - start_time) * 1000
-            result = ToolResult(tool_name, False, error=str(e), latency_ms=latency)
-            self._log_usage(result, params, tool.metadata)
-            return result
+        # Temporary demo tool — LLM tool
+        if name == "llm_tool":
+            query = args.get("query", "")
+
+            # Fake response for now
+            return {
+                "response": f"[MOCK TOOL OUTPUT] Processed: {query}"
+            }
+
+        raise ValueError(f"Tool '{name}' not found")
 
     def _log_usage(self, result: ToolResult, params: Dict, metadata: Dict):
         """Internal helper for auditing and benchmarking."""

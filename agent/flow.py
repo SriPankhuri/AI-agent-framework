@@ -11,13 +11,18 @@ class ExecutionMode(Enum):
 
 @dataclass
 class Task:
-    """A single unit of work within a workflow."""
-    id: str
-    action: str
-    params: dict = field(default_factory=dict)
-    dependencies: List[str] = field(default_factory=list)
-    # Metadata for Intel-specific optimizations (e.g., precision hints)
-    metadata: dict = field(default_factory=dict)
+    """
+    Unified Task model compatible with AgentController
+    """
+
+    def __init__(self, id, action, params=None, depends_on=None):
+        self.id = id
+
+        # Controller expects these names
+        self.name = id
+        self.tool_name = action
+        self.args = params or {}
+        self.depends_on = depends_on or []
 
 class TaskResult:
     """Audit-friendly result container."""
